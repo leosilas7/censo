@@ -1,0 +1,498 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Exemplo com IndexedDB (PWA)</title>
+
+  <!-- Manifest PWA -->
+  <link rel="manifest" href="manifest.json">
+  <!-- <meta name="theme-color" content="#007bff"> -->
+
+  <!-- <link rel="shortcut icon" href="/favicon.ico" type="image/x-icon"> -->
+  <!-- <link rel="shortcut icon" href="https://www2.praiagrande.sp.gov.br/img/jpg/brasao_prefeitura.png" type="image/png"> -->
+
+  <style>
+    body {
+      font-family: sans-serif;
+      margin: 20px;
+      background-color: #f4f4f4;
+    }
+    form, ul {
+      background-color: #fff;
+      padding: 20px;
+      margin-bottom: 20px;
+      border-radius: 8px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    label {
+      display: block;
+      margin-bottom: 5px;
+      font-weight: bold;
+    }
+    input[type="text"] {
+      width: calc(100% - 22px);
+      padding: 10px;
+      margin-bottom: 15px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+    }
+    button {
+      background-color: #007bff;
+      color: white;
+      padding: 10px 15px;
+      border: none;
+      border-radius: 4 камерpx;
+      cursor: pointer;
+      font-size: 1em;
+    }
+    button:hover {
+      background-color: #0056b3;
+    }
+    li {
+      background-color: #e9e9e9;
+      padding: 10px;
+      margin-bottom: 5px;
+      border-radius: 4px;
+      list-style: none;
+      word-break: break-word; /* Garante que texto longo quebre a linha */
+    }
+    h1, h2 {
+        color: #333;
+    }
+  </style>
+</head>
+<body>
+  <h1>Sistema Offline com IndexedDB (PWA) - Tipos Sexo</h1>
+  <form id="formulario">
+    <label for="nomeTipoSexo">Nome do Tipo de Sexo:</label>
+    <input type="text" id="nomeTipoSexo" required>
+    <br>
+    <button type="submit">Salvar</button>
+
+  </form>
+    <button onclick="reenviarPendentes()">Reenviar Pendentes</button>
+  <h2>Dados Armazenados</h2>
+  <ul id="listaDados"></ul>
+
+<script>
+    if (!window.indexedDB) {
+      console.error("Este navegador não suporta IndexedDB.");
+    }
+
+    let db;
+    // Use uma nova versão do banco de dados para que onupgradeneeded seja acionado
+    const request = indexedDB.open("BancoRespostasTiposSexo", 2); // Versão 2
+
+    request.onerror = function(event) {
+      console.error("Erro ao abrir o banco de dados", event);
+    };
+
+    request.onupgradeneeded = function(event) {
+      db = event.target.result;
+      
+      // Remove a loja antiga 'respostas' se ela existir da versão 1
+      if (event.oldVersion < 2 && db.objectStoreNames.contains("respostas")) {
+          db.deleteObjectStore("respostas");
+          console.log("Loja 'respostas' removida (upgrade v2)");
+      }
+
+      // Cria a nova loja para os dados dos tipos de sexo
+      if (!db.objectStoreNames.contains("tiposSexos")) {
+        // Usaremos um ID local auto-incrementado para gerenciar itens offline
+        let store = db.createObjectStore("tiposSexos", { keyPath: "localId", autoIncrement: true });
+        // Cria índice para o nome
+        store.createIndex("nomeTipoSexo", "nomeTipoSexo", { unique: false });
+        // Cria índice para o ID da API (poderá ser 0 ou null antes da sincronização)
+        store.createIndex("tipoSexoId", "tipoSexoId", { unique: false });
+      }
+
+      // Cria/atualiza a loja para dados pendentes de sincronização
+      if (!db.objectStoreNames.contains("pendingSync")) {
+          // Usa um timestamp como ID para as requisições pendentes
+          db.createObjectStore("pendingSync", { keyPath: "id" });
+      }
+      console.log("Upgrade de banco de dados para a versão 2 concluído.");
+    };
+
+    request.onsuccess = function(event) {
+      db = event.target.result;
+      console.log("Banco de dados aberto com sucesso (v2)");
+      carregarDados();
+      // Opcional: Tentar sincronizar ao abrir o app se houver itens pendentes
+       if ('serviceWorker' in navigator && 'SyncManager' in window) {
+           navigator.serviceWorker.ready.then(registration => {
+                registration.sync.register('sync-responses')
+                    .then(() => console.log('Background Sync agendado ao abrir app'))
+                    .catch(err => console.error('Falha ao agendar Background Sync ao abrir app:', err));
+            }).catch(err => console.error('Service Worker não pronto para agendar sync:', err));
+       }
+    };
+
+    // Função para salvar dados no IndexedDB local ('tiposSexos')
+    function salvarTipoSexoLocal(dado) {
+        return new Promise((resolve, reject) => {
+            const transaction = db.transaction(["tiposSexos"], "readwrite");
+            const store = transaction.objectStore("tiposSexos");
+            
+            const itemToSave = {
+                nomeTipoSexo: dado.nomeTipoSexo,
+                tipoSexoId: 0, // <-- Definido como 0 aqui
+                dataCriacaoLocal: new Date().toISOString()
+            };
+
+            const addRequest = store.add(itemToSave);
+
+            addRequest.onsuccess = (event) => {
+                const localId = event.target.result;
+                console.log("Tipo Sexo salvo localmente:", { ...itemToSave, localId: localId });
+                resolve({ ...itemToSave, localId: localId });
+            };
+
+            addRequest.onerror = (e) => {
+                console.error("Erro ao salvar tipo sexo localmente", e);
+                reject(e);
+            };
+        });
+    }
+
+
+//     // Função para salvar dados pendentes de sincronização no IndexedDB ('pendingSync')
+//     function salvarParaSync(localItem) {
+//         const transaction = db.transaction(["pendingSync"], "readwrite");
+//         const store = transaction.objectStore("pendingSync");
+//         
+//         const dataToStore = {
+//             id: Date.now(),
+//             localId: localItem.localId,
+//             timestamp: new Date().toISOString(),
+//             method: 'POST',
+//             apiEndpoint: 'https://localhost:44335/api/tiposexo/cadastrar',
+//             data: {
+//                  "tipoSexoId": 0, 
+//                  "nomeTipoSexo": localItem.nomeTipoSexo
+//              }
+//         };
+
+//         const addRequest = store.add(dataToStore);
+
+//         addRequest.onsuccess = () => {
+//             console.log("Dados salvos para sincronização offline:", dataToStore);
+//             
+//             if ('serviceWorker' in navigator && 'SyncManager' in window) {
+//                 navigator.serviceWorker.ready.then(registration => {
+//                     registration.sync.register('sync-responses')
+//                         .then(() => {
+//                             console.log('Background Sync registrado!');
+//                         })
+//                         .catch(err => {
+//                             console.error('Falha ao registrar Background Sync:', err);
+//                         });
+//                 });
+//             } else {
+//                 console.warn('Background Sync não suportado ou Service Worker não pronto.');
+//             }
+//             carregarDados();
+//         };
+
+//         addRequest.onerror = (e) => {
+//             console.error("Erro ao salvar dados para sincronização offline", e);
+//              carregarDados(); 
+//         };
+//     }
+
+// Função para salvar dados pendentes de sincronização no IndexedDB ('pendingSync')
+    function salvarParaSync(localItem) { 
+        console.log("salvarParaSync: >>> Iniciando salvamento para fila de sync para localId:", localItem.localId, "Nome:", localItem.nomeTipoSexo);
+        const transaction = db.transaction(["pendingSync"], "readwrite");
+        const store = transaction.objectStore("pendingSync");
+        
+        const syncEntryId = Date.now(); // Gerar ID da entrada da fila ANTES de criar o objeto
+        const dataToStore = {
+            id: syncEntryId, // ID único para a REQUISIÇÃO de sync (timestamp)
+            localId: localItem.localId, // Referência ao item local na loja tiposSexos
+            timestamp: new Date().toISOString(),
+            method: 'POST',
+            apiEndpoint: 'https://localhost:44335/api/tiposexo/cadastrar',
+            data: { 
+                 "tipoSexoId": 0, 
+                 "nomeTipoSexo": localItem.nomeTipoSexo
+             }
+        };
+
+        console.log("salvarParaSync: Objeto a ser adicionado na fila (syncId:", syncEntryId, "):", dataToStore);
+        const addRequest = store.add(dataToStore);
+
+        addRequest.onsuccess = () => {
+            console.log("salvarParaSync: ### Dados salvos com sucesso na fila pendingSync. syncId:", syncEntryId, "localId:", localItem.localId);
+            
+            if ('serviceWorker' in navigator && 'SyncManager' in window) {
+                navigator.serviceWorker.ready.then(registration => {
+                    console.log("salvarParaSync: Service Worker pronto, tentando registrar sync.");
+                    registration.sync.register('sync-responses')
+                        .then(() => {
+                            console.log('salvarParaSync: +++ Background Sync registrado com sucesso para tag "sync-responses".');
+                        })
+                        .catch(err => {
+                            console.error('salvarParaSync: --- Falha ao registrar Background Sync:', err);
+                        });
+                });
+            } else {
+                console.warn('salvarParaSync: !!! Background Sync não suportado ou Service Worker não pronto para registro.');
+            }
+            carregarDados(); // Atualiza a UI para mostrar o item como Pendente
+            console.log("salvarParaSync: <<< Função concluída após sucesso na adição à fila.");
+        };
+
+        addRequest.onerror = (e) => {
+            console.error("salvarParaSync: --- Erro ao salvar dados para sincronização offline", e);
+             carregarDados(); 
+             console.log("salvarParaSync: <<< Função concluída após erro na adição à fila.");
+        };
+    }
+
+    // Função para carregar os dados e exibi-los na tela
+    function carregarDados() {
+      const lista = document.getElementById("listaDados");
+      lista.innerHTML = "";
+      const transaction = db.transaction(["tiposSexos"], "readonly");
+      const store = transaction.objectStore("tiposSexos");
+      const request = store.openCursor(null, 'prev');
+
+      request.onsuccess = function(event) {
+        const cursor = event.target.result;
+        if (cursor) {
+          const li = document.createElement("li");
+          li.textContent = `Nome: ${cursor.value.nomeTipoSexo} | API TipoSexoId: ${cursor.value.tipoSexoId || 'Pendente'}`; // Exibe 0 como 'Pendente' ainda
+          lista.appendChild(li);
+          cursor.continue();
+        } else {
+             console.log("Todos os dados locais carregados.");
+         }
+      };
+       request.onerror = (e) => {
+           console.error("Erro ao carregar dados do IndexedDB", e);
+       };
+    }
+
+// function reenviarPendentes() {
+//     const transaction = db.transaction(["pendingSync"], "readonly");
+//     const store = transaction.objectStore("pendingSync");
+
+//     const request = store.openCursor();
+
+//     request.onsuccess = async function(event) {
+//         const cursor = event.target.result;
+//         if (cursor) {
+//             const item = cursor.value;
+
+//             try {
+//                 const response = await fetch(item.apiEndpoint, {
+//                     method: item.method,
+//                     headers: {
+//                         'Content-Type': 'application/json',
+//                         'Accept': '*/*'
+//                     },
+//                     body: JSON.stringify(item.data)
+//                 });
+
+//                 if (response.ok) {
+//                     const apiData = await response.json();
+//                     console.log("Reenvio bem-sucedido:", item, "Resposta da API:", apiData);
+
+//                     // Atualiza o tipoSexoId no IndexedDB
+//                     const updateTransaction = db.transaction(["tiposSexos", "pendingSync"], "readwrite");
+//                     const tiposStore = updateTransaction.objectStore("tiposSexos");
+//                     const pendingStore = updateTransaction.objectStore("pendingSync");
+
+//                     const getLocalItem = tiposStore.get(item.localId);
+//                     getLocalItem.onsuccess = () => {
+//                         const localItem = getLocalItem.result;
+//                         if (localItem) {
+//                             localItem.tipoSexoId = apiData.tipoSexoId;
+//                             tiposStore.put(localItem);
+//                         }
+//                     };
+
+//                     // Remove da fila
+//                     pendingStore.delete(item.id);
+
+//                     updateTransaction.oncomplete = () => carregarDados();
+//                 } else {
+//                     const text = await response.text();
+//                     console.warn("Erro ao reenviar item:", response.status, text);
+//                 }
+//             } catch (error) {
+//                 console.error("Falha ao reenviar item (possível offline):", error);
+//             }
+
+//             cursor.continue();
+//         } else {
+//             console.log("Reenvio de pendentes concluído.");
+//         }
+//     };
+
+//     request.onerror = function(e) {
+//         console.error("Erro ao acessar itens pendentes:", e);
+//     };
+// }
+
+function reenviarPendentes() {
+    const transaction = db.transaction(["pendingSync"], "readonly");
+    const store = transaction.objectStore("pendingSync");
+    const request = store.getAll();
+
+    request.onsuccess = async function(event) {
+        const items = event.target.result;
+
+        if (!items.length) {
+            console.log("Nenhum item pendente para reenviar.");
+            return;
+        }
+
+        for (const item of items) {
+            try {
+                const response = await fetch(item.apiEndpoint, {
+                    method: item.method,
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Accept': '*/*'
+                    },
+                    body: JSON.stringify(item.data)
+                });
+
+                if (response.ok) {
+                    const apiData = await response.json();
+                    console.log("Reenvio bem-sucedido:", item, "Resposta da API:", apiData);
+
+                    // Atualiza o tipoSexoId no IndexedDB
+                    const updateTransaction = db.transaction(["tiposSexos", "pendingSync"], "readwrite");
+                    const tiposStore = updateTransaction.objectStore("tiposSexos");
+                    const pendingStore = updateTransaction.objectStore("pendingSync");
+
+                    const getLocalItem = tiposStore.get(item.localId);
+                    getLocalItem.onsuccess = () => {
+                        const localItem = getLocalItem.result;
+                        if (localItem) {
+                            localItem.tipoSexoId = apiData.tipoSexoId;
+                            tiposStore.put(localItem);
+                        }
+                    };
+
+                    // Remove da fila
+                    pendingStore.delete(item.id);
+
+                    updateTransaction.oncomplete = () => carregarDados();
+                } else {
+                    const text = await response.text();
+                    console.warn("Erro ao reenviar item:", response.status, text);
+                }
+            } catch (error) {
+                console.error("Falha ao reenviar item (possível offline):", error);
+            }
+        }
+
+        console.log("Reenvio de pendentes concluído.");
+    };
+
+    request.onerror = function(e) {
+        console.error("Erro ao acessar itens pendentes:", e);
+    };
+}
+
+
+    // Listener para o envio do formulário
+    document.getElementById("formulario").addEventListener("submit", async function(event) {
+      event.preventDefault();
+      const nomeTipoSexo = document.getElementById("nomeTipoSexo").value;
+      
+      if (nomeTipoSexo) {
+        const dadoParaSalvar = { 
+          nomeTipoSexo: nomeTipoSexo
+        };
+
+        let localItem;
+        try {
+            // 1. Salva localmente primeiro para exibição imediata e obter o localId
+            localItem = await salvarTipoSexoLocal(dadoParaSalvar);
+        } catch (error) {
+            console.error("Não foi possível salvar localmente:", error);
+            alert("Erro ao salvar localmente. Verifique o console.");
+            return;
+        }
+        
+        const apiEndpoint = 'https://localhost:44335/api/tiposexo/cadastrar'; 
+        const apiRequestBody = { 
+            "tipoSexoId": 0, 
+            "nomeTipoSexo": nomeTipoSexo
+        };
+
+        // 2. Tenta enviar para a API
+        fetch(apiEndpoint, {
+            method: 'POST', 
+            headers: {
+                'Content-Type': 'application/json',
+                'Accept': '*/*'
+            },
+            body: JSON.stringify(apiRequestBody)
+        })
+        .then(async response => { 
+            if (response.ok) {
+                 const apiData = await response.json();
+                console.log('Dados enviados para a API com sucesso!');
+                 console.log('API retornou:', apiData);
+
+                 const updateTransaction = db.transaction(["tiposSexos"], "readwrite");
+                 const store = updateTransaction.objectStore("tiposSexos");
+                 const getRequest = store.get(localItem.localId);
+
+                 getRequest.onsuccess = (event) => {
+                     const itemToUpdate = event.target.result;
+                     if (itemToUpdate) {
+                         itemToUpdate.tipoSexoId = apiData.tipoSexoId; 
+                         const putRequest = store.put(itemToUpdate); 
+                         putRequest.onsuccess = () => {
+                             console.log('Registro local (ID:', localItem.localId, ') atualizado com API ID:', apiData.tipoSexoId);
+                             carregarDados(); 
+                         };
+                         putRequest.onerror = (e) => console.error('Erro ao atualizar registro local com API ID', e);
+                     } else {
+                         console.warn('Registro local não encontrado para atualização com API ID:', localItem.localId);
+                     }
+                 };
+                 getRequest.onerror = (e) => console.error('Erro ao buscar registro local para atualização', e);
+
+             } else {
+                 const errorText = await response.text();
+                 console.warn(`Erro na resposta da API (${response.status}): ${errorText}. Salvando para sincronização offline.`);
+                 salvarParaSync(localItem);
+             }
+        })
+        .catch(error => {
+            console.error('Falha na requisição de rede (offline ou outro erro):', error);
+            console.log('Salvando dados para sincronização offline.');
+            salvarParaSync(localItem);
+        });
+
+        event.target.reset();
+      }
+    });
+
+    // Listener para mensagens do Service Worker (opcional, para saber quando a sync terminou)
+    if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.addEventListener('message', event => {
+            if (event.data && event.data.type === 'sync-complete') {
+                console.log('Mensagem do SW: Sincronização concluída para local ID:', event.data.localId, 'com API ID:', event.data.apiId);
+                 carregarDados(); 
+            }
+        });
+    }
+
+    if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/service-worker.js')
+    .then(reg => console.log('Service Worker registrado:', reg.scope))
+    .catch(err => console.error('Erro ao registrar SW:', err));
+}
+
+  </script>
+
